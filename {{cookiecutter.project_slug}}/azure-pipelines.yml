@@ -1,10 +1,13 @@
+# Branch strategy:
+#   feature/*, dev  - local integration branches. Security scan + SCA/SAST/Test run for fast
+#                      feedback, but no package is built.
+#   release/*       - cut per release cycle (e.g. release/2026-08). Accumulates changes destined
+#                      for a release. This is the only branch family that builds the package -
+#                      build once, then fan out to UAT and Production below (build-once-deploy-many).
 trigger:
-  branches:
-    include:
-      - main
-  paths:
-    exclude:
-      - README.md
+  - feature/*
+  - dev
+  - release/*
 
 pr:
   branches:
@@ -15,42 +18,41 @@ variables:
   pythonVersion: '{{ cookiecutter.python_version }}'
   vmImageName: 'ubuntu-latest'
   packageName: '{{ cookiecutter.package_name }}'
+  functionAppName: '{{ cookiecutter.function_app_name }}'
+  isReleaseBranch: $[startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')]
 
 stages:
-  - stage: Build
-    displayName: 'Compile & Package'
+  - stage: SecurityScan
+    displayName: 'Security Scan'
     jobs:
-      - job: Build
+      - job: CodeAnalysis
+        displayName: 'Code Analysis'
         pool:
           vmImage: $(vmImageName)
+        continueOnError: false
         steps:
-          - task: UsePythonVersion@0
+          - task: MicrosoftSecurityDevOps@1
+            displayName: 'Run Code Analysis'
             inputs:
-              versionSpec: '$(pythonVersion)'
-            displayName: 'Use Python $(pythonVersion)'
+              policy: azuredevops
+              publish: true
+              artifactName: 'CodeAnalysisLogs'
 
-          - script: |
-              python -m pip install --upgrade pip
-              pip install -r requirements.txt
-              pip install -r requirements-dev.txt
-            displayName: 'Install dependencies'
+          - task: AdvancedSecurity-Codeql-Init@1
+            displayName: 'CodeQL Init'
+            inputs:
+              enableAutomaticCodeQLInstall: true
+              languages: 'python'
 
-          - script: |
-              python -m compileall $(packageName)
-            displayName: 'Compile (syntax check)'
+          - task: AdvancedSecurity-Dependency-Scanning@1
+            displayName: 'CodeQL Dependency Scanning'
 
-          - script: |
-              pip install build
-              python -m build
-            displayName: 'Build package artifact'
-
-          - publish: dist
-            artifact: dist
-            displayName: 'Publish build artifact'
+          - task: AdvancedSecurity-Codeql-Analyze@1
+            displayName: 'CodeQL Analyze'
 
   - stage: SCA
     displayName: 'Software Composition Analysis'
-    dependsOn: Build
+    dependsOn: SecurityScan
     jobs:
       - job: PipAudit
         pool:
@@ -77,7 +79,7 @@ stages:
 
   - stage: SAST
     displayName: 'Static Application Security Testing'
-    dependsOn: Build
+    dependsOn: SecurityScan
     jobs:
       - job: Bandit
         pool:
@@ -103,7 +105,7 @@ stages:
 
   - stage: Test
     displayName: 'Unit Tests'
-    dependsOn: Build
+    dependsOn: SecurityScan
     jobs:
       - job: PyTest
         pool:
@@ -132,3 +134,92 @@ stages:
           - task: PublishCodeCoverageResults@2
             inputs:
               summaryFileLocation: 'coverage.xml'
+
+  # --- Build once ---------------------------------------------------------
+  # Only builds on release/* branches. UAT and Production below both deploy this
+  # same package artifact - never rebuilt per environment.
+  - stage: Build
+    displayName: 'Compile & Package'
+    condition: and(succeeded(), eq(variables.isReleaseBranch, 'True'))
+    dependsOn:
+      - SCA
+      - SAST
+      - Test
+    jobs:
+      - job: Build
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Use Python $(pythonVersion)'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt --target=".python_packages/lib/site-packages"
+            displayName: 'Install dependencies into deployment package'
+
+          - script: |
+              python -m compileall $(packageName)
+            displayName: 'Compile (syntax check)'
+
+          - task: ArchiveFiles@2
+            displayName: 'Archive function app'
+            inputs:
+              rootFolderOrFile: '$(System.DefaultWorkingDirectory)'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(functionAppName)-$(Build.BuildId).zip'
+
+          - publish: '$(Build.ArtifactStagingDirectory)/$(functionAppName)-$(Build.BuildId).zip'
+            artifact: drop
+            displayName: 'Publish build artifact'
+
+  # --- Deploy many ---------------------------------------------------------
+  # Each deployment job targets an Azure DevOps environment. Configure approvals/checks
+  # on the '{{ cookiecutter.uat_environment_name }}' and '{{ cookiecutter.prod_environment_name }}'
+  # environments in Project Settings > Environments (e.g. manual approval before Production).
+  - stage: DeployUAT
+    displayName: 'Deploy to UAT'
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables.isReleaseBranch, 'True'))
+    jobs:
+      - deployment: DeployFunctionApp
+        displayName: 'Deploy Function App (UAT)'
+        environment: '{{ cookiecutter.uat_environment_name }}'
+        pool:
+          vmImage: $(vmImageName)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureFunctionApp@2
+                  displayName: 'Deploy to Azure Function App (UAT)'
+                  inputs:
+                    azureSubscription: 'azure-service-connection-uat'
+                    appType: 'functionAppLinux'
+                    appName: '$(functionAppName)-uat'
+                    package: '$(Pipeline.Workspace)/drop/$(functionAppName)-$(Build.BuildId).zip'
+
+  - stage: DeployProduction
+    displayName: 'Deploy to Production'
+    dependsOn: DeployUAT
+    condition: and(succeeded(), eq(variables.isReleaseBranch, 'True'))
+    jobs:
+      - deployment: DeployFunctionApp
+        displayName: 'Deploy Function App (Production)'
+        environment: '{{ cookiecutter.prod_environment_name }}'
+        pool:
+          vmImage: $(vmImageName)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureFunctionApp@2
+                  displayName: 'Deploy to Azure Function App (Production)'
+                  inputs:
+                    azureSubscription: 'azure-service-connection-prod'
+                    appType: 'functionAppLinux'
+                    appName: '$(functionAppName)-prod'
+                    package: '$(Pipeline.Workspace)/drop/$(functionAppName)-$(Build.BuildId).zip'

@@ -8,5 +8,7 @@
     "azure_devops_project": "my-ado-project",
     "python_version": "3.11",
     "function_app_name": "{{ cookiecutter.project_slug }}",
+    "uat_environment_name": "uat",
+    "prod_environment_name": "production",
     "open_source_license": ["Proprietary", "MIT"]
 }
