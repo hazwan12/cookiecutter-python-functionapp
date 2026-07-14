@@ -10,5 +10,7 @@
     "function_app_name": "{{ cookiecutter.project_slug }}",
     "uat_environment_name": "uat",
     "prod_environment_name": "production",
+    "sast_tool": ["codeql", "bandit"],
+    "sca_tool": ["dependency-scanning", "pip-audit"],
     "open_source_license": ["Proprietary", "MIT"]
 }
