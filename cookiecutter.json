@@ -1,0 +1,12 @@
+{
+    "project_name": "My Function App",
+    "project_slug": "{{ cookiecutter.project_name.lower().replace(' ', '-').replace('_', '-') }}",
+    "package_name": "{{ cookiecutter.project_slug.replace('-', '_') }}",
+    "description": "An Azure Function App built from cookiecutter-python-functionapp",
+    "author_name": "Your Name",
+    "author_email": "you@example.com",
+    "azure_devops_project": "my-ado-project",
+    "python_version": "3.11",
+    "function_app_name": "{{ cookiecutter.project_slug }}",
+    "open_source_license": ["Proprietary", "MIT"]
+}
